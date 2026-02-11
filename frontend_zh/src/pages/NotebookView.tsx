@@ -15,6 +15,8 @@ import ReactMarkdown from 'react-markdown';
 import { MermaidPreview } from '../components/knowledge-base/tools/MermaidPreview';
 import { SettingsModal } from '../components/SettingsModal';
 import DrawioInlineEditor from '../components/DrawioInlineEditor';
+import katex from 'katex';
+import 'katex/dist/katex.min.css';
 
 // 不做用户管理时使用，数据从 outputs 取
 const DEFAULT_USER = { id: 'default', email: 'default' };
@@ -113,9 +115,6 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
   const [retrievalError, setRetrievalError] = useState('');
   const [retrievalTopK, setRetrievalTopK] = useState(5);
   const [retrievalModel, setRetrievalModel] = useState('text-embedding-3-large');
-  const [embeddingLoading, setEmbeddingLoading] = useState(false);
-  const [embedOnUpload, setEmbedOnUpload] = useState(true);
-  const [fileEmbedLoading, setFileEmbedLoading] = useState<Record<string, boolean>>({});
   const [vectorFiles, setVectorFiles] = useState<any[]>([]);
   const [vectorLoading, setVectorLoading] = useState(false);
   const [vectorError, setVectorError] = useState('');
@@ -129,6 +128,7 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
   const [fastResearchSelected, setFastResearchSelected] = useState<Set<number>>(new Set());
   const [fastResearchError, setFastResearchError] = useState('');
   const [importingSources, setImportingSources] = useState(false);
+  const [fileUploading, setFileUploading] = useState(false);
   // Deep Research 报告生成
   const [deepResearchTopic, setDeepResearchTopic] = useState('');
   const [deepResearchLoading, setDeepResearchLoading] = useState(false);
@@ -430,12 +430,6 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
     return originalPath;
   };
 
-  const getEmbeddingApiUrl = (rawUrl: string) => {
-    if (!rawUrl) return '';
-    if (rawUrl.includes('/embeddings')) return rawUrl;
-    return `${rawUrl.replace(/\/$/, '')}/embeddings`;
-  };
-
   const markEmbedded = async (file?: KnowledgeFile, storagePath?: string) => {
     if (isSupabaseConfigured()) {
       if (file?.id) {
@@ -457,93 +451,6 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
         return f;
       });
       localStorage.setItem(storageKey, JSON.stringify(updated));
-    }
-  };
-
-  const handleEmbedFiles = async (filesToEmbed: KnowledgeFile[], storagePaths?: string[]) => {
-    const settings = getApiSettings(effectiveUser?.id || null);
-    const apiUrl = getEmbeddingApiUrl(settings?.apiUrl?.trim() || '');
-    const apiKey = settings?.apiKey?.trim() || '';
-    if (!apiUrl || !apiKey) {
-      const msg = '请先在设置中配置 API URL 和 API Key';
-      setRetrievalError(msg);
-      alert(msg);
-      return false;
-    }
-
-    const payloadFiles = filesToEmbed
-      .filter(f => f.url)
-      .map(f => ({ path: f.url as string, description: f.desc || '' }));
-
-    if (storagePaths && storagePaths.length > 0) {
-      storagePaths.forEach(path => {
-        if (!payloadFiles.find(p => p.path === path)) {
-          payloadFiles.push({ path, description: '' });
-        }
-      });
-    }
-
-    if (payloadFiles.length === 0) {
-      const msg = '无法获取文件路径，请确认文件已上传';
-      setRetrievalError(msg);
-      alert(msg);
-      return false;
-    }
-
-    setEmbeddingLoading(true);
-    setRetrievalError('');
-    try {
-      const body: Record<string, unknown> = {
-        files: payloadFiles,
-        api_url: apiUrl,
-        api_key: apiKey,
-        model_name: retrievalModel
-      };
-      if (effectiveUser?.email || effectiveUser?.id) body.email = effectiveUser.email || effectiveUser.id;
-      if (notebook?.id) body.notebook_id = notebook.id;
-      const res = await apiFetch('/api/v1/kb/embedding', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      if (!res.ok) {
-        let msg = '生成向量失败';
-        try {
-          const body = await res.json();
-          msg = body?.detail || body?.message || msg;
-        } catch {
-          msg = await res.text() || msg;
-        }
-        if (res.status === 401 || (typeof msg === 'string' && msg.includes('401'))) {
-          msg = 'API 认证失败（401），请检查设置中的 API Key 是否正确、是否已过期。';
-        }
-        throw new Error(msg);
-      }
-      const data = await res.json();
-      const failed = (data?.manifest?.files || []).filter((f: any) => f?.status === 'failed');
-      if (failed.length > 0) {
-        const firstErr = failed[0]?.error || '未知错误';
-        throw new Error(firstErr.includes('401') ? 'API 认证失败（401），请检查设置中的 API Key。' : firstErr);
-      }
-      for (const f of filesToEmbed) {
-        await markEmbedded(f);
-      }
-      if (storagePaths) {
-        for (const p of storagePaths) {
-          await markEmbedded(undefined, p);
-        }
-      }
-      // 入库成功后刷新向量列表和来源列表，使按钮显示「已入库」、来源管理同步
-      await fetchVectorList();
-      await fetchFiles();
-      return true;
-    } catch (err: any) {
-      const msg = err?.message || '生成向量失败';
-      setRetrievalError(msg);
-      alert(msg);
-      return false;
-    } finally {
-      setEmbeddingLoading(false);
     }
   };
 
@@ -577,6 +484,7 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
       };
       if (effectiveUser?.email || effectiveUser?.id) body.email = effectiveUser.email || effectiveUser.id;
       if (notebook?.id) body.notebook_id = notebook.id;
+      if (notebook?.title || notebook?.name) body.notebook_title = notebook?.title || notebook?.name || '';
       const res = await apiFetch('/api/v1/kb/embedding', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -945,6 +853,21 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
     } else if (isPreviewableDoc(file) && file.url && (file.url.startsWith('/outputs/') || file.url.startsWith('/'))) {
       setSourceDetailLoading(true);
       try {
+        // 优先展示 MinerU 产出的 MD；若无则回退到 parse-local-file
+        const displayRes = await apiFetch('/api/v1/kb/get-source-display-content', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: file.url })
+        });
+        if (displayRes.ok) {
+          const displayData = await displayRes.json();
+          if (displayData?.from_mineru && displayData?.content != null) {
+            setSourceDetailContent(displayData.content);
+            setSourceDetailFormat('markdown');
+            setSourceDetailLoading(false);
+            return;
+          }
+        }
         const res = await apiFetch('/api/v1/kb/parse-local-file', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1030,6 +953,7 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
           notebook_id: notebook.id,
           email: effectiveUser.email || effectiveUser.id,
           user_id: effectiveUser.id,
+          notebook_title: notebook?.title || notebook?.name || '',
           items
         })
       });
@@ -1039,9 +963,11 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
       }
       const data = await res.json();
       await fetchFiles();
+      await fetchVectorList();
       setFastResearchSources([]);
       setFastResearchSelected(new Set());
-      alert(`已导入 ${data?.imported ?? items.length} 个来源`);
+      const embeddedMsg = data?.embedded ? `，已向量化 ${data.embedded} 个` : '';
+      alert(`已导入 ${data?.imported ?? items.length} 个来源${embeddedMsg}`);
     } catch (err: any) {
       alert(err?.message || '导入失败');
     } finally {
@@ -1069,6 +995,7 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
           notebook_id: notebook.id,
           email: effectiveUser.email || effectiveUser.id,
           user_id: effectiveUser.id,
+          notebook_title: notebook?.title || notebook?.name || '',
           url,
         }),
       });
@@ -1120,6 +1047,7 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
           notebook_id: notebook.id,
           email: effectiveUser.email || effectiveUser.id,
           user_id: effectiveUser.id,
+          notebook_title: notebook?.title || notebook?.name || '',
           title: '直接输入',
           content,
         }),
@@ -1183,6 +1111,7 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
           user_id: effectiveUser.id,
           email: effectiveUser.email || effectiveUser.id,
           notebook_id: notebook.id,
+          notebook_title: notebook?.title || notebook?.name || '',
           api_url: apiUrl,
           api_key: apiKey,
           language: 'zh',
@@ -1254,7 +1183,9 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
     formData.append('email', effectiveUser.email || effectiveUser.id || 'default');
     formData.append('user_id', effectiveUser.id || 'default');
     formData.append('notebook_id', notebook.id);
+    formData.append('notebook_title', notebook?.title || notebook?.name || '');
 
+    setFileUploading(true);
     try {
       const res = await apiFetch('/api/v1/kb/upload', {
         method: 'POST',
@@ -1264,26 +1195,22 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
       if (!res.ok) throw new Error('Upload failed');
 
       const data = await res.json();
-      if (embedOnUpload) {
-        const ok = await handleEmbedFiles([], [data.static_url]);
-        if (ok) {
-          alert('上传成功，已入库向量！');
-        } else {
-          setRetrievalError('上传成功，但向量入库失败。请先配置 API（右上角设置）后点击「生成向量」。');
-          alert('上传成功，但向量入库失败。请先在设置中配置 API，再在来源中点击「生成向量」。');
-        }
-      } else {
-        await fetchFiles();
-        if (options?.onSuccess) options.onSuccess();
-        else alert('上传成功！');
-      }
       await fetchFiles();
       await fetchVectorList();
+      if (data.embedded) {
+        if (options?.onSuccess) options.onSuccess();
+        else alert('上传成功，已自动入库！');
+      } else {
+        if (options?.onSuccess) options.onSuccess();
+        else alert('上传成功，但自动入库失败。可在来源管理中重新入库。');
+      }
     } catch (err: any) {
       console.error('Upload error:', err);
       const msg = err?.message || '上传失败，请重试';
       setRetrievalError(msg);
       alert(msg);
+    } finally {
+      setFileUploading(false);
     }
   };
 
@@ -1337,6 +1264,8 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
           files: selectedFiles,
           query: userMsg.content,
           history: history,
+          email: effectiveUser?.email || effectiveUser?.id || undefined,
+          notebook_id: notebook?.id || undefined,
           api_url: settings?.apiUrl?.trim() || undefined,
           api_key: settings?.apiKey?.trim() || undefined
         })
@@ -1351,7 +1280,8 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
         role: 'assistant',
         content: data.answer || "抱歉，我无法回答这个问题。",
         time: new Date().toLocaleTimeString(),
-        details: data.file_analyses
+        details: data.file_analyses,
+        sourceMapping: data.source_mapping || undefined
       };
       setChatMessages(prev => [...prev, botMsg]);
       persistCurrentConversation([...chatMessages, userMsg, botMsg]);
@@ -1412,6 +1342,8 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
       const baseBody: any = {
         user_id: effectiveUser?.id || 'default',
         email: effectiveUser?.email || effectiveUser?.id || 'default',
+        notebook_id: notebook?.id || undefined,
+        notebook_title: notebook?.title || notebook?.name || '',
         api_url: apiUrl,
         api_key: apiKey
       };
@@ -1610,17 +1542,46 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
 
-  const renderInline = (text: string) => {
-    let html = escapeHtml(text);
+  const renderKatex = (tex: string, displayMode: boolean) => {
+    try {
+      return katex.renderToString(tex, { displayMode, throwOnError: false });
+    } catch {
+      return `<code>${escapeHtml(tex)}</code>`;
+    }
+  };
+
+  const renderInline = (text: string, sourceMapping?: Record<string, string>) => {
+    // 1) 先提取行内公式 $...$ 保护起来，避免 escapeHtml 破坏
+    const mathSlots: string[] = [];
+    let protected_ = text.replace(/\$([^$\n]+?)\$/g, (_m, tex) => {
+      mathSlots.push(renderKatex(tex, false));
+      return `\x00MATH${mathSlots.length - 1}\x00`;
+    });
+    // 2) 正常 escapeHtml + markdown 处理
+    let html = escapeHtml(protected_);
     html = html.replace(/`([^`]+)`/g, '<code class="px-1 py-0.5 rounded bg-gray-100 text-gray-800 font-mono text-xs">$1</code>');
     html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     html = html.replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>');
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer" class="text-blue-600 hover:text-blue-500 underline">$1</a>');
+    // Highlight numbered citation markers [1], [2], etc. with hover tooltip showing source name
+    html = html.replace(/\[(\d{1,2})\]/g, (_match, num) => {
+      const sourceName = sourceMapping?.[num] || '';
+      const dataAttr = sourceName ? ` data-source="${escapeHtml(sourceName)}"` : '';
+      return `<sup class="cite-ref"${dataAttr} style="background-color:#dbeafe;color:#1d4ed8;padding:1px 5px;border-radius:4px;font-size:0.75em;font-weight:600;margin:0 1px;cursor:pointer;position:relative;">[${num}]</sup>`;
+    });
+    // 3) 还原公式占位符
+    html = html.replace(/\x00MATH(\d+)\x00/g, (_m, idx) => mathSlots[Number(idx)]);
     return html;
   };
 
-  const renderMarkdownToHtml = (content: string) => {
+  const renderMarkdownToHtml = (content: string, sourceMapping?: Record<string, string>) => {
     if (!content) return '';
+    // 先提取 $$...$$ 块级公式，替换为占位符
+    const blockMathSlots: string[] = [];
+    let processed = content.replace(/\$\$([\s\S]+?)\$\$/g, (_m, tex) => {
+      blockMathSlots.push(`<div class="my-3 overflow-x-auto text-center">${renderKatex(tex.trim(), true)}</div>`);
+      return `\n%%BLOCKMATH${blockMathSlots.length - 1}%%\n`;
+    });
     const codeBlockRegex = /```([a-zA-Z0-9_-]+)?\n([\s\S]*?)```/g;
     let lastIndex = 0;
     let html = '';
@@ -1650,7 +1611,7 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
         if (headingMatch) {
           closeLists();
           const level = headingMatch[1].length;
-          const headingText = renderInline(headingMatch[2]);
+          const headingText = renderInline(headingMatch[2], sourceMapping);
           blockHtml += `<h${level} class="font-semibold text-gray-900 mt-3 mb-2">${headingText}</h${level}>`;
           continue;
         }
@@ -1661,7 +1622,7 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
             blockHtml += '<ul class="list-disc pl-5 space-y-1">';
             inUl = true;
           }
-          blockHtml += `<li>${renderInline(trimmed.replace(/^[-*]\s+/, ''))}</li>`;
+          blockHtml += `<li>${renderInline(trimmed.replace(/^[-*]\s+/, ''), sourceMapping)}</li>`;
           continue;
         }
 
@@ -1671,7 +1632,7 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
             blockHtml += '<ol class="list-decimal pl-5 space-y-1">';
             inOl = true;
           }
-          blockHtml += `<li>${renderInline(trimmed.replace(/^\d+\.\s+/, ''))}</li>`;
+          blockHtml += `<li>${renderInline(trimmed.replace(/^\d+\.\s+/, ''), sourceMapping)}</li>`;
           continue;
         }
 
@@ -1682,29 +1643,31 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
         }
 
         closeLists();
-        blockHtml += `<p class="my-1">${renderInline(line)}</p>`;
+        blockHtml += `<p class="my-1">${renderInline(line, sourceMapping)}</p>`;
       }
 
       closeLists();
       return blockHtml;
     };
 
-    while ((match = codeBlockRegex.exec(content)) !== null) {
-      const before = content.slice(lastIndex, match.index);
+    while ((match = codeBlockRegex.exec(processed)) !== null) {
+      const before = processed.slice(lastIndex, match.index);
       html += processTextBlock(before);
       const code = escapeHtml(match[2].replace(/\s+$/, ''));
       html += `<pre class="bg-gray-100 border border-gray-200 rounded-lg p-3 my-2 overflow-x-auto text-xs"><code class="text-gray-800 font-mono whitespace-pre">${code}</code></pre>`;
       lastIndex = match.index + match[0].length;
     }
 
-    html += processTextBlock(content.slice(lastIndex));
+    html += processTextBlock(processed.slice(lastIndex));
+    // 还原块级公式占位符
+    html = html.replace(/%%BLOCKMATH(\d+)%%/g, (_m, idx) => blockMathSlots[Number(idx)]);
     return html;
   };
 
-  const MarkdownContent = ({ content }: { content: string }) => (
+  const MarkdownContent = ({ content, sourceMapping }: { content: string; sourceMapping?: Record<string, string> }) => (
     <div
       className="text-sm leading-relaxed text-gray-700"
-      dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(content) }}
+      dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(content, sourceMapping) }}
     />
   );
 
@@ -1726,6 +1689,51 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
 
   return (
     <div className="h-screen flex flex-col bg-[#f8f9fa] overflow-hidden">
+      {/* Citation tooltip styles */}
+      <style>{`
+        .cite-ref[data-source] {
+          transition: background-color 0.15s ease;
+        }
+        .cite-ref[data-source]:hover {
+          background-color: #bfdbfe !important;
+        }
+        .cite-ref[data-source]:hover::after {
+          content: "📄 " attr(data-source);
+          position: absolute;
+          bottom: calc(100% + 8px);
+          left: 50%;
+          transform: translateX(-50%);
+          background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+          color: #f1f5f9;
+          padding: 8px 14px;
+          border-radius: 8px;
+          font-size: 12px;
+          line-height: 1.4;
+          font-weight: 500;
+          letter-spacing: 0.01em;
+          white-space: nowrap;
+          z-index: 50;
+          pointer-events: none;
+          box-shadow: 0 4px 16px rgba(0,0,0,0.18), 0 1px 4px rgba(0,0,0,0.1);
+          animation: citeTooltipIn 0.15s ease-out;
+        }
+        .cite-ref[data-source]:hover::before {
+          content: "";
+          position: absolute;
+          bottom: calc(100% + 2px);
+          left: 50%;
+          transform: translateX(-50%);
+          border: 5px solid transparent;
+          border-top-color: #1e293b;
+          z-index: 50;
+          pointer-events: none;
+          animation: citeTooltipIn 0.15s ease-out;
+        }
+        @keyframes citeTooltipIn {
+          from { opacity: 0; transform: translateX(-50%) translateY(4px); }
+          to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+        }
+      `}</style>
       {/* Header */}
       <header className="h-14 bg-white border-b flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-4">
@@ -1790,13 +1798,14 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
               id="file-upload"
               className="hidden"
               onChange={handleFileUpload}
+              disabled={fileUploading}
             />
             <label
               htmlFor="file-upload"
-              className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-white border border-gray-200 rounded-full text-sm font-medium text-gray-700 hover:shadow-sm transition-all cursor-pointer"
+              className={`flex-1 flex items-center justify-center gap-2 py-2.5 bg-white border border-gray-200 rounded-full text-sm font-medium transition-all ${fileUploading ? 'text-gray-400 cursor-not-allowed opacity-60' : 'text-gray-700 hover:shadow-sm cursor-pointer'}`}
             >
-              <Upload size={16} />
-              上传文件
+              {fileUploading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
+              {fileUploading ? '正在引入...' : '上传文件'}
             </label>
             <button
               type="button"
@@ -1807,30 +1816,6 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
               引入
             </button>
           </div>
-          <label className="flex items-center gap-2 text-xs text-gray-500 mb-4">
-            <input
-              type="checkbox"
-              checked={embedOnUpload}
-              onChange={(e) => setEmbedOnUpload(e.target.checked)}
-              className="rounded text-blue-500"
-            />
-            上传后自动生成向量
-          </label>
-
-          {!apiConfigured && (
-            <div className="mb-3 flex flex-col gap-2 px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-lg">
-              <p className="text-xs text-amber-800">
-                使用「生成向量」前请先配置 API（右上角齿轮）
-              </p>
-              <button
-                type="button"
-                onClick={() => setShowSettingsModal(true)}
-                className="text-xs font-medium text-amber-700 hover:text-amber-900 underline"
-              >
-                去设置 →
-              </button>
-            </div>
-          )}
 
           {retrievalError && (
             <div className="mb-3 px-3 py-2.5 bg-red-50 border border-red-100 rounded-lg space-y-1.5">
@@ -1876,71 +1861,30 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
                 />
               </div>
 
-              {embeddingLoading && (
-                <div className="mb-3 flex items-center gap-2 px-3 py-2.5 bg-blue-50 border border-blue-100 rounded-lg">
-                  <Loader2 size={18} className="text-blue-500 shrink-0 animate-spin" />
-                  <span className="text-sm text-blue-700">正在引入</span>
-                </div>
-              )}
-
               <div className="flex-1 overflow-y-auto min-h-0">
                 {files.length === 0 ? (
                   <div className="text-center py-8 text-gray-400 text-sm">
                     暂无文件，请上传
                   </div>
                 ) : (
-                  files.map(file => (
+                  files.map((file, fileIdx) => (
                     <div
                       key={file.id}
                       className="flex items-center gap-3 p-3 bg-white border border-gray-100 rounded-xl mb-2 hover:shadow-sm transition-all cursor-pointer"
                       onClick={() => openSourceDetail(file)}
                     >
-                      <div className="w-8 h-8 bg-red-50 rounded flex items-center justify-center shrink-0">
-                        <FileText size={16} className="text-red-500" />
+                      <div className="w-8 h-8 bg-blue-50 rounded flex items-center justify-center shrink-0">
+                        <span className="text-xs font-bold text-blue-600">{fileIdx + 1}</span>
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="text-xs text-gray-700 line-clamp-2 leading-tight">
                           {file.name}
                         </div>
                         <div className="mt-1 flex items-center gap-2">
-                          {file.isEmbedded || file.kbFileId || vectorStatusByPath[getOutputsPath(file.url)] === 'embedded' || vectorFiles.some((v: any) => getOutputsPath(v?.original_path) === getOutputsPath(file.url)) ? (
+                          {(file.isEmbedded || file.kbFileId || vectorStatusByPath[getOutputsPath(file.url)] === 'embedded' || vectorFiles.some((v: any) => getOutputsPath(v?.original_path) === getOutputsPath(file.url))) && (
                             <span className="text-[10px] px-2 py-0.5 rounded-full bg-green-50 text-green-600">
                               已入库
                             </span>
-                          ) : !apiConfigured ? (
-                            <button
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); setShowSettingsModal(true); }}
-                              className="text-[10px] px-2 py-0.5 rounded-full border border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100"
-                            >
-                              去配置
-                            </button>
-                          ) : (
-                            <button
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                const key = file.id;
-                                setFileEmbedLoading(prev => ({ ...prev, [key]: true }));
-                                setRetrievalError('');
-                                try {
-                                  const ok = await handleEmbedFiles([file]);
-                                  if (ok) {
-                                    await fetchFiles();
-                                    await fetchVectorList();
-                                  }
-                                } catch (err: any) {
-                                  const msg = err?.message || '生成向量失败';
-                                  setRetrievalError(msg);
-                                  alert(msg);
-                                } finally {
-                                  setFileEmbedLoading(prev => ({ ...prev, [key]: false }));
-                                }
-                              }}
-                              disabled={fileEmbedLoading[file.id]}
-                              className="text-[10px] px-2 py-0.5 rounded-full border border-blue-200 text-blue-600 hover:bg-blue-50 disabled:opacity-50"
-                            >
-                              {fileEmbedLoading[file.id] ? '入库中...' : '生成向量'}
-                            </button>
                           )}
                         </div>
                       </div>
@@ -2111,7 +2055,7 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
                       msg.role === 'assistant' ? 'bg-gray-50 text-gray-700' : 'bg-blue-500 text-white'
                     }`}>
                       {msg.role === 'assistant' ? (
-                        <MarkdownContent content={msg.content} />
+                        <MarkdownContent content={msg.content} sourceMapping={msg.sourceMapping} />
                       ) : (
                         <span>{msg.content}</span>
                       )}
@@ -2252,12 +2196,6 @@ const NotebookView = ({ notebook, onBack }: { notebook: any, onBack: () => void 
 
             {activeTab === 'sources' && (
               <div className="max-w-[900px] mx-auto w-full space-y-6">
-                {!apiConfigured && (
-                  <div className="flex items-center justify-between gap-4 p-4 bg-amber-50 border border-amber-200 rounded-2xl">
-                    <p className="text-sm text-amber-800">请先配置 API 后才能在左侧进行「生成向量」。</p>
-                    <button type="button" onClick={() => setShowSettingsModal(true)} className="shrink-0 text-sm font-medium text-amber-700 hover:text-amber-900 underline">去设置</button>
-                  </div>
-                )}
                 <div className="bg-gray-50 border border-gray-200 rounded-2xl p-6">
                   <h3 className="text-lg font-semibold text-gray-900">向量库文件列表</h3>
                   <p className="text-sm text-gray-500 mt-1">
